@@ -1,0 +1,320 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 10 11:49:08 2018
+
+@author: 黄浩桂
+"""
+from __future__ import print_function
+
+from sklearn.datasets import make_blobs
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_samples, silhouette_score
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import numpy as np
+import pandas as pd
+
+#创建要聚类的数据集
+data=pd.read_csv('D:/train.csv')
+data_pre=pd.read_csv('D:/pred.csv')
+X=data.iloc[:,1:-1]
+X_pred=data_pre.iloc[:,1:-1]
+
+#根据图来看K选多少，elbow_method
+distortions = []
+for i in range(1, 11):
+    km = KMeans(n_clusters=i,#分多少类
+                init='k-means++',#Method for initialization:
+                n_init=10,#K次划分，默认划分10次
+                max_iter=300,#迭代次数
+                random_state=0)
+    km.fit(X)
+    distortions.append(km.inertia_)
+plt.plot(range(1,11), distortions, marker='o')
+plt.xlabel('Number of clusters')
+plt.ylabel('Distortion')
+plt.show()
+#由图可见 类别数分成3类，即K=3为最佳
+#silhouette analysis 轮廓分析，判定K-means模型的质量
+#其计算步骤如下：
+#对于第 i 个对象，计算它到所属簇中所有其他对象的平均距离，记 ai （体现凝聚度）
+#对于第 i 个对象和不包含该对象的任意簇，计算该对象到给定簇中所有对象的平均距离，记 bi （体现分离度）
+#第 i 个对象的轮廓系数为 si = (bi-ai)/max(ai, bi)  //回头研究一下 wordpress 的公式插件去
+km = KMeans(n_clusters=3,
+            init='k-means++',
+            n_init=10,
+            max_iter=300,
+            tol=1e-04,
+            random_state=0)
+y_km = km.fit_predict(X) #产生预测值
+
+
+#产生预测集的标签
+km = KMeans(n_clusters=3,
+            init='k-means++',
+            n_init=10,
+            max_iter=300,
+            tol=1e-04,
+            random_state=0)
+y_km_pred = km.fit_predict(X_pred) #产生预测值
+
+
+
+'''cluster_labels = np.unique(y_km)
+n_clusters = cluster_labels.shape[0]
+silhouette_vals = silhouette_samples(X,
+                                     y_km,
+                                     metric='euclidean')#算力不够
+y_ax_lower, y_ax_upper = 0, 0
+yticks = []
+for i, c in enumerate(cluster_labels):
+    c_silhouette_vals = silhouette_vals[y_km == c]
+    c_silhouette_vals.sort()
+    y_ax_upper += len(c_silhouette_vals)
+    color = cm.jet(i / n_clusters)
+    plt.barh(range(y_ax_lower, y_ax_upper),
+             c_silhouette_vals,
+             height=1.0,
+             edgecolor='none',
+             color=color)
+    yticks.append((y_ax_lower + y_ax_upper) / 2)
+    y_ax_lower += len(c_silhouette_vals)
+    silhouette_avg = np.mean(silhouette_vals)
+    plt.axvline(silhouette_avg,
+                color="red",
+                linestyle="--")
+    plt.yticks(yticks, cluster_labels + 1)
+    plt.ylabel('Cluster')
+    plt.xlabel('Silhouette coefficient')
+    plt.show()
+#将原数据和聚类的值进行结合
+'''
+data_kmeans=pd.concat([data,pd.DataFrame({'y_km':y_km})],axis=1)
+data_kmeans_pred=pd.concat([data_pre,pd.DataFrame({'y_km_pred':y_km_pred})],axis=1)
+
+#按聚类标签分成3组:
+cluster_1=data_kmeans.ix[y_km==0,:-1]
+cluster_2=data_kmeans.ix[y_km==1,:-1]
+cluster_3=data_kmeans.ix[y_km==2,:-1]
+
+#预测集分成3组
+cluster_pre1=data_kmeans_pred.ix[y_km_pred==0,:-1]
+cluster_pre2=data_kmeans_pred.ix[y_km_pred==1,:-1]
+cluster_pre3=data_kmeans_pred.ix[y_km_pred==2,:-1]
+
+
+
+#每个聚类完成的数据进行xgb
+#第一个群
+import xgboost as xgb
+from xgboost.sklearn import XGBClassifier
+from imblearn.combine import SMOTEENN
+from sklearn.metrics import f1_score  ,confusion_matrix
+from sklearn import  metrics   #Additional     scklearn functions
+train = cluster_1
+train_x = cluster_1.iloc[:,1:-1]
+train_y = cluster_1['Label']
+sm = SMOTEENN(ratio={1:8000})
+X_resampled, y_resampled = sm.fit_sample(np.array(train_x), np.array(train_y))
+pred = cluster_pre1
+pred = pred.reset_index()
+pred=pred.drop('index',1)
+from matplotlib.pylab import rcParams
+rcParams['figure.figsize'] = 12, 4
+target = 'Label'
+IDcol = 'ID'
+def modelfit(alg, dtrain, predictors,useTrainCV=True, cv_folds=5, early_stopping_rounds=50):
+    if useTrainCV:
+        xgb_param = alg.get_xgb_params()
+        xgtrain = xgb.DMatrix(dtrain[predictors].values, label=dtrain[target].values)
+        cvresult = xgb.cv(xgb_param, xgtrain, num_boost_round=alg.get_params()['n_estimators'], nfold=cv_folds,
+            metrics='auc', early_stopping_rounds=early_stopping_rounds)
+        alg.set_params(n_estimators=cvresult.shape[0])
+    
+        #Fit the algorithm on the data
+        alg.fit(dtrain[predictors], dtrain[target],eval_metric='auc')
+        
+        #Predict training set:
+        dtrain_predictions = alg.predict(dtrain[predictors])#产出smot每个ID的0和1
+        pred_y = alg.predict(pred[predictors])#产出预测集的0和1
+        ori_pred = alg.predict(train[predictors])#产出原始数据集的0和1
+        output = pd.concat([pred,pd.DataFrame({'Label':pred_y})],axis = 1)#合并输出
+        dtrain_predprob = alg.predict_proba(dtrain[predictors])[:,1]#每个id的预测概率
+        
+        #Print model report:
+        print("\nModel Report")
+        print("Accuracy : %.4g" % metrics.accuracy_score(dtrain[target].values, dtrain_predictions))
+        print("AUC Score (Train): %f" % metrics.roc_auc_score(dtrain[target], dtrain_predprob))
+        print("f1_score:%f" % f1_score(np.array(dtrain[target]),dtrain_predictions))
+        print(confusion_matrix(np.array(dtrain[target]),dtrain_predictions))
+        print("f1_score_ori:%f" % f1_score(np.array(train[target]),ori_pred))
+        print("ori_confuse:")
+        print(confusion_matrix(np.array(train[target]),ori_pred))
+        print(pd.DataFrame(pred_y)[0].value_counts())
+        return output
+
+predictors = [x for x in train.columns if x not in [target,IDcol]]
+train_resample_x = pd.DataFrame(X_resampled,columns = predictors,index = [x for x in range(0,X_resampled.shape[0],1)])
+train_resample_y = pd.DataFrame({'Label':y_resampled})
+train_resampled = pd.concat([train_resample_x,train_resample_y],axis=1)
+xgb1 = XGBClassifier(
+ learning_rate =0.1,
+ n_estimators=500,
+ max_depth=5,
+ min_child_weight=1,
+ gamma=0,
+ subsample=0.8,
+ colsample_bytree=0.8,
+ objective= 'binary:logistic',
+ nthread=4,
+ scale_pos_weight=1,
+ seed=27)
+output = modelfit(xgb1, train_resampled, predictors)
+
+
+
+
+
+#第二个群
+train = cluster_2
+train_x = cluster_2.iloc[:,1:-1]
+train_y = cluster_2['Label']
+sm = SMOTEENN(ratio={1:8000})
+X_resampled, y_resampled = sm.fit_sample(np.array(train_x), np.array(train_y))
+pred = cluster_pre2
+pred = pred.reset_index()
+pred=pred.drop('index',1)
+from matplotlib.pylab import rcParams
+rcParams['figure.figsize'] = 12, 4
+target = 'Label'
+IDcol = 'ID'
+def modelfit(alg, dtrain, predictors,useTrainCV=True, cv_folds=5, early_stopping_rounds=50):
+    if useTrainCV:
+        xgb_param = alg.get_xgb_params()
+        xgtrain = xgb.DMatrix(dtrain[predictors].values, label=dtrain[target].values)
+        cvresult = xgb.cv(xgb_param, xgtrain, num_boost_round=alg.get_params()['n_estimators'], nfold=cv_folds,
+            metrics='auc', early_stopping_rounds=early_stopping_rounds)
+        alg.set_params(n_estimators=cvresult.shape[0])
+    
+        #Fit the algorithm on the data
+        alg.fit(dtrain[predictors], dtrain[target],eval_metric='auc')
+        
+        #Predict training set:
+        dtrain_predictions = alg.predict(dtrain[predictors])#产出smot每个ID的0和1
+        pred_y = alg.predict(pred[predictors])#产出预测集的0和1
+        ori_pred = alg.predict(train[predictors])#产出原始数据集的0和1
+        output = pd.concat([pred,pd.DataFrame({'Label':pred_y})],axis = 1)#合并输出
+        dtrain_predprob = alg.predict_proba(dtrain[predictors])[:,1]#每个id的预测概率
+        
+        #Print model report:
+        print("\nModel Report")
+        print("Accuracy : %.4g" % metrics.accuracy_score(dtrain[target].values, dtrain_predictions))
+        print("AUC Score (Train): %f" % metrics.roc_auc_score(dtrain[target], dtrain_predprob))
+        print("f1_score:%f" % f1_score(np.array(dtrain[target]),dtrain_predictions))
+        print(confusion_matrix(np.array(dtrain[target]),dtrain_predictions))
+        print("f1_score_ori:%f" % f1_score(np.array(train[target]),ori_pred))
+        print("ori_confuse:")
+        print(confusion_matrix(np.array(train[target]),ori_pred))
+        print(pd.DataFrame(pred_y)[0].value_counts())
+        return output
+
+predictors = [x for x in train.columns if x not in [target,IDcol]]
+train_resample_x = pd.DataFrame(X_resampled,columns = predictors,index = [x for x in range(0,X_resampled.shape[0],1)])
+train_resample_y = pd.DataFrame({'Label':y_resampled})
+train_resampled = pd.concat([train_resample_x,train_resample_y],axis=1)
+xgb1 = XGBClassifier(
+ learning_rate =0.1,
+ n_estimators=500,
+ max_depth=5,
+ min_child_weight=1,
+ gamma=0,
+ subsample=0.8,
+ colsample_bytree=0.8,
+ objective= 'binary:logistic',
+ nthread=4,
+ scale_pos_weight=1,
+ seed=27)
+output2 = modelfit(xgb1, train_resampled, predictors)
+
+
+
+
+#第三个群
+train = cluster_3
+train_x = cluster_3.iloc[:,1:-1]
+train_y = cluster_3['Label']
+sm = SMOTEENN(ratio={1:8000})
+X_resampled, y_resampled = sm.fit_sample(np.array(train_x), np.array(train_y))
+pred = cluster_pre3
+pred = pred.reset_index()
+pred=pred.drop('index',1)
+from matplotlib.pylab import rcParams
+rcParams['figure.figsize'] = 12, 4
+target = 'Label'
+IDcol = 'ID'
+def modelfit(alg, dtrain, predictors,useTrainCV=True, cv_folds=5, early_stopping_rounds=50):
+    if useTrainCV:
+        xgb_param = alg.get_xgb_params()
+        xgtrain = xgb.DMatrix(dtrain[predictors].values, label=dtrain[target].values)
+        cvresult = xgb.cv(xgb_param, xgtrain, num_boost_round=alg.get_params()['n_estimators'], nfold=cv_folds,
+            metrics='auc', early_stopping_rounds=early_stopping_rounds)
+        alg.set_params(n_estimators=cvresult.shape[0])
+    
+        #Fit the algorithm on the data
+        alg.fit(dtrain[predictors], dtrain[target],eval_metric='auc')
+        
+        #Predict training set:
+        dtrain_predictions = alg.predict(dtrain[predictors])#产出smot每个ID的0和1
+        pred_y = alg.predict(pred[predictors])#产出预测集的0和1
+        ori_pred = alg.predict(train[predictors])#产出原始数据集的0和1
+        output = pd.concat([pred,pd.DataFrame({'Label':pred_y})],axis = 1)#合并输出
+        dtrain_predprob = alg.predict_proba(dtrain[predictors])[:,1]#每个id的预测概率
+        
+        #Print model report:
+        print("\nModel Report")
+        print("Accuracy : %.4g" % metrics.accuracy_score(dtrain[target].values, dtrain_predictions))
+        print("AUC Score (Train): %f" % metrics.roc_auc_score(dtrain[target], dtrain_predprob))
+        print("f1_score:%f" % f1_score(np.array(dtrain[target]),dtrain_predictions))
+        print(confusion_matrix(np.array(dtrain[target]),dtrain_predictions))
+        print("f1_score_ori:%f" % f1_score(np.array(train[target]),ori_pred))
+        print("ori_confuse:")
+        print(confusion_matrix(np.array(train[target]),ori_pred))
+        print(pd.DataFrame(pred_y)[0].value_counts())
+        return output
+
+predictors = [x for x in train.columns if x not in [target,IDcol]]
+train_resample_x = pd.DataFrame(X_resampled,columns = predictors,index = [x for x in range(0,X_resampled.shape[0],1)])
+train_resample_y = pd.DataFrame({'Label':y_resampled})
+train_resampled = pd.concat([train_resample_x,train_resample_y],axis=1)
+xgb1 = XGBClassifier(
+ learning_rate =0.1,
+ n_estimators=500,
+ max_depth=5,
+ min_child_weight=1,
+ gamma=0,
+ subsample=0.8,
+ colsample_bytree=0.8,
+ objective= 'binary:logistic',
+ nthread=4,
+ scale_pos_weight=1,
+ seed=27)
+output3 = modelfit(xgb1, train_resampled, predictors)
+
+#合并三类数据集
+k_means_final=pd.concat([output,output2,output3])
+k_means_final['Label'].value_counts()
+k_means_final.to_csv("D:/k_means_final.csv",index=False,columns=['ID','label'],sep=',')
+
+
+
+
+
+
+
+
+
+
+
+
+
